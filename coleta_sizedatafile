@@ -1,0 +1,112 @@
+#!/bin/bash
+
+# Set environment variables
+export ORACLE_HOME=/u01/app/oracle/product/19.3.0/dbhome_1
+export ORACLE_SID=ORCL
+export PATH=$ORACLE_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+
+# Query para verificar espaço livre nos tablespaces
+SQL_QUERY="
+SET PAGESIZE 0
+SET FEEDBACK OFF
+SET VERIFY OFF
+SET HEADING OFF
+
+SELECT
+    tablespace_name || '|' ||
+    ROUND(total_mb, 2) || '|' ||
+    ROUND(used_mb, 2) || '|' ||
+    ROUND(free_mb, 2) || '|' ||
+    ROUND(pct_used, 2) || '|' ||
+    autoextensible || '|' ||
+    status
+FROM (
+    SELECT
+        df.tablespace_name,
+        SUM(df.bytes)/1024/1024 total_mb,
+        (SUM(df.bytes) - NVL(SUM(fs.bytes), 0))/1024/1024 used_mb,
+        NVL(SUM(fs.bytes), 0)/1024/1024 free_mb,
+        ((SUM(df.bytes) - NVL(SUM(fs.bytes), 0)) / SUM(df.bytes)) * 100 pct_used,
+        MAX(df.autoextensible) autoextensible,
+        MAX(df.status) status
+    FROM dba_data_files df
+    LEFT JOIN dba_free_space fs ON df.tablespace_name = fs.tablespace_name
+    GROUP BY df.tablespace_name
+    UNION ALL
+    SELECT
+        tf.tablespace_name,
+        SUM(tf.bytes)/1024/1024 total_mb,
+        (SUM(tf.bytes) - NVL(SUM(fs.bytes), 0))/1024/1024 used_mb,
+        NVL(SUM(fs.bytes), 0)/1024/1024 free_mb,
+        ((SUM(tf.bytes) - NVL(SUM(fs.bytes), 0)) / SUM(tf.bytes)) * 100 pct_used,
+        'NO' autoextensible,
+        'ONLINE' status
+    FROM dba_temp_files tf
+    LEFT JOIN dba_free_space fs ON tf.tablespace_name = fs.tablespace_name
+    GROUP BY tf.tablespace_name
+)
+ORDER BY pct_used DESC;
+"
+
+# Executa a consulta
+RESULT=$(sqlplus -s user/pass << EOF
+$SQL_QUERY
+EOF
+)
+
+# Verifica se a consulta foi bem sucedida
+if [ $? -ne 0 ]; then
+    echo "CRITICAL - Erro ao executar consulta no banco de dados"
+    exit 2
+fi
+
+# Verifica se há resultados
+if [ -z "$RESULT" ]; then
+    echo "OK - Nenhum tablespace encontrado"
+    exit 0
+fi
+
+# Variáveis para status final
+FINAL_STATUS=0
+FINAL_MESSAGE="OK - Todos os tablespaces dentro dos limites"
+CRITICAL_TABLESPACES=""
+WARNING_TABLESPACES=""
+PERFDATA=""
+
+# Processa cada tablespace
+echo "$RESULT" | while IFS='|' read -r TABLESPACE TOTAL_MB USED_MB FREE_MB PCT_USED AUTOEXTEND STATUS; do
+    if [ -n "$TABLESPACE" ]; then
+        # Remove espaços em branco
+        TABLESPACE=$(echo $TABLESPACE | xargs)
+        PCT_USED=$(echo $PCT_USED | xargs)
+        # Verifica limites
+        if (( $(echo "$PCT_USED > 90" | bc -l) )); then
+            CRITICAL_TABLESPACES="$CRITICAL_TABLESPACES $TABLESPACE(${PCT_USED}%)"
+            FINAL_STATUS=2
+        elif (( $(echo "$PCT_USED > 80" | bc -l) )); then
+            WARNING_TABLESPACES="$WARNING_TABLESPACES $TABLESPACE(${PCT_USED}%)"
+            if [ $FINAL_STATUS -eq 0 ]; then
+                FINAL_STATUS=1
+            fi
+        fi
+        # Adiciona performance data
+        PERFDATA="$PERFDATA ${TABLESPACE}_pct=${PCT_USED}%;80;90;0;100"
+        PERFDATA="$PERFDATA ${TABLESPACE}_used=${USED_MB}MB;;;0;${TOTAL_MB}"
+    fi
+done
+
+# Aguarda o loop terminar para pegar as variáveis atualizadas
+# (Em produção, considere usar arquivo temporário para capturar as variáveis)
+
+# Mensagem final baseada no status
+if [ $FINAL_STATUS -eq 2 ]; then
+    echo "CRITICAL - Tablespaces críticos:$CRITICAL_TABLESPACES | $PERFDATA"
+    exit 2
+elif [ $FINAL_STATUS -eq 1 ]; then
+    echo "WARNING - Tablespaces com alerta:$WARNING_TABLESPACES | $PERFDATA"
+    exit 1
+else
+    echo "OK - Todos os tablespaces dentro dos limites | $PERFDATA"
+    exit 0
+fi
