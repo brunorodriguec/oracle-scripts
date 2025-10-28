@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# Set environment variables
+export ORA_INVENTORY=/u01/app/oraInventory
+export DATA_DIR=/u01/app/oracle/oradata
+export ORACLE_BASE=/u01/app/oracle
+export ORACLE_HOME=$ORACLE_BASE/product/19.3.0/dbhome_1
+export ORACLE_SID=ORCL
+export NLS_LANG=PORTUGUESE_BRAZIL.WE8MSWIN1252
+export PATH=$ORACLE_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+
+# Query para obter top 10 objetos
+SQL_QUERY="
+SET PAGESIZE 0
+SET FEEDBACK OFF
+SET VERIFY OFF
+SET HEADING OFF
+SELECT
+    owner || '|' ||
+    segment_name || '|' ||
+    segment_type || '|' ||
+    ROUND(bytes/1024/1024, 2) || '|' ||
+    tablespace_name
+FROM (
+    SELECT
+        owner,
+        segment_name,
+        segment_type,
+        bytes,
+        tablespace_name
+    FROM dba_segments
+    WHERE segment_type IN ('TABLE', 'INDEX', 'TABLE PARTITION', 'INDEX PARTITION')
+    ORDER BY bytes DESC
+)
+WHERE ROWNUM <= 10;
+"
+
+# Executa a consulta
+RESULT=$(sqlplus -s user/pass << EOF
+$SQL_QUERY
+EOF
+)
+
+# Verifica se a consulta foi bem sucedida
+if [ $? -ne 0 ]; then
+    echo "CRITICAL - Erro ao executar consulta no banco de dados"
+    exit 2
+fi
+
+# Verifica se há resultados
+if [ -z "$RESULT" ]; then
+    echo "OK - Nenhum objeto encontrado"
+    exit 0
+fi
+# Formata a saída como tabela
+echo "OK - Top 10 maiores objetos do banco"
+echo ""
+
+# Cabeçalho da tabela
+printf "%-20s %-30s %-20s %-10s %-15s\n" "Owner" "Segment Name" "Type" "Size (MB)" "Tablespace"
+printf "%-20s %-30s %-20s %-10s %-15s\n" "-----" "------------" "----" "---------" "----------"
+
+# Processa cada linha do resultado
+echo "$RESULT" | while IFS='|' read -r OWNER SEGMENT_NAME SEGMENT_TYPE SIZE TABLESPACE; do
+    if [ -n "$OWNER" ]; then
+        printf "%-20s %-30s %-20s %-10s %-15s\n" "$OWNER" "$SEGMENT_NAME" "$SEGMENT_TYPE" "$SIZE" "$TABLESPACE"
+    fi
+done
+
+exit 0
