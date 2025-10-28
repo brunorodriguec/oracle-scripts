@@ -1,0 +1,96 @@
+#!/bin/bash
+
+# Caminho do alert log
+ALERT_LOG="/u01/app/oracle/diag/rdbms/orcl/ORCL/trace/alert_ORCL.log"
+
+# Verifica se o arquivo existe
+if [ ! -f "$ALERT_LOG" ]; then
+    echo "CRITICAL - Arquivo de alert log não encontrado: $ALERT_LOG"
+    exit 2
+fi
+
+# Obtém a data de 2 horas atrás para filtro
+if command -v date &> /dev/null; then
+    TWO_HOURS_AGO=$(date -d '2 hours ago' '+%Y-%m-%d %H:%M' 2>/dev/null || date -v-2H '+%Y-%m-%d %H:%M' 2>/dev/null || echo "")
+fi
+
+# Função para extrair timestamp das linhas
+extract_timestamp() {
+    echo "$1" | grep -oE '[A-Za-z]{3} [A-Za-z]{3} [0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}' | head -1
+}
+
+# Coleta erros das últimas 2 horas ou últimos 5 erros
+RECENT_ERRORS=""
+LINE_COUNT=0
+
+# Lê o arquivo de trás para frente (mais eficiente)
+tac "$ALERT_LOG" 2>/dev/null | while IFS= read -r LINE; do
+    if echo "$LINE" | grep -qi "ORA-"; then
+        if [ $LINE_COUNT -lt 5 ]; then
+            RECENT_ERRORS="$LINE"$'\n'"$RECENT_ERRORS"
+            LINE_COUNT=$((LINE_COUNT + 1))
+        else
+            break
+        fi
+    fi
+done
+
+# Se tac não estiver disponível, usa tail + head
+if [ -z "$RECENT_ERRORS" ]; then
+    RECENT_ERRORS=$(grep -i "ORA-" "$ALERT_LOG" | tail -5)
+fi
+
+# Processa os erros
+TOTAL_ERRORS=$(echo "$RECENT_ERRORS" | grep -c "ORA-" || true)
+
+if [ $TOTAL_ERRORS -eq 0 ]; then
+    echo "OK - Nenhum erro ORA- encontrado nas últimas 2 horas | total_errors=0;0;0"
+    exit 0
+fi
+
+# Classifica os erros
+CRITICAL_ERRORS=$(echo "$RECENT_ERRORS" | grep -E "ORA-00600|ORA-07445|ORA-04031|ORA-01555|ORA-01653|ORA-01578" | head -5)
+OTHER_ERRORS=$(echo "$RECENT_ERRORS" | grep -v -E "ORA-00600|ORA-07445|ORA-04031|ORA-01555|ORA-01653|ORA-01578" | head -5)
+
+# Determina status
+if [ -n "$CRITICAL_ERRORS" ]; then
+    STATUS=2
+    STATUS_MSG="CRITICAL"
+elif [ -n "$OTHER_ERRORS" ]; then
+    STATUS=1
+    STATUS_MSG="WARNING"
+else
+    STATUS=0
+    STATUS_MSG="OK"
+fi
+
+# Saída
+echo "$STATUS_MSG - $TOTAL_ERRORS erro(s) ORA- encontrado(s) nas últimas 2 horas"
+#echo "<br><br>"
+#echo "<pre style='font-family: monospace; font-size: 11px;'>"
+
+if [ -n "$CRITICAL_ERRORS" ]; then
+    echo "ERROS CRÍTICOS:"
+    echo "=============="
+    echo "$CRITICAL_ERRORS" | head -5 | while IFS= read -r ERROR; do
+        if [ -n "$ERROR" ]; then
+            echo "🔴 $ERROR<br>"
+        fi
+    done
+    echo ""
+fi
+
+if [ -n "$OTHER_ERRORS" ]; then
+    echo "OUTROS ERROS:"
+    echo "============"
+    echo "$OTHER_ERRORS" | head -7 | while IFS= read -r ERROR; do
+        if [ -n "$ERROR" ]; then
+            echo "🟡 $ERROR"
+        fi
+    done
+fi
+
+echo ""
+echo " | total_errors=$TOTAL_ERRORS;0;0"
+
+exit $STATUS
