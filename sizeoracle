@@ -1,0 +1,59 @@
+#!/bin/bash
+# Check Oracle Database Size and Usage in MB and %
+# Nagios-compatible output
+
+export ORA_INVENTORY=/u01/app/oraInventory
+export DATA_DIR=/u01/app/oracle/oradata
+export ORACLE_BASE=/u01/app/oracle
+export ORACLE_HOME=$ORACLE_BASE/product/19.3.0/dbhome_1
+export ORACLE_SID=ORCL
+export NLS_LANG=PORTUGUESE_BRAZIL.WE8MSWIN1252
+export PATH=$ORACLE_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+
+USER="user"
+PASS="pass"
+DB="ORCL"
+
+# Thresholds
+WARN=80
+CRIT=90
+
+# Executa a consulta no Oracle
+RESULT=$(sqlplus -S -L $USER/$PASS@$DB <<EOF
+SET HEADING OFF FEEDBACK OFF VERIFY OFF ECHO OFF PAGESIZE 0 TRIMSPOOL ON
+SELECT
+  ROUND((SELECT SUM(bytes)/1024/1024 FROM dba_data_files),2) AS TOTAL_MB,
+  ROUND((SELECT SUM(bytes)/1024/1024 FROM dba_segments),2) AS USED_MB,
+  ROUND(( (SELECT SUM(bytes)/1024/1024 FROM dba_segments) /
+         (SELECT SUM(bytes)/1024/1024 FROM dba_data_files) ) * 100, 2) AS USED_PCT
+FROM dual;
+EXIT;
+EOF
+)
+
+# Limpa resultado removendo linhas vazias
+RESULT=$(echo $RESULT | tr -s ' ')
+
+# Separa os valores
+TOTAL_MB=$(echo $RESULT | awk '{print $1}')
+USED_MB=$(echo $RESULT | awk '{print $2}')
+USED_PCT=$(echo $RESULT | awk '{print $3}')
+
+# Valida se conseguimos pegar os dados
+if [[ -z "$TOTAL_MB" || -z "$USED_MB" || -z "$USED_PCT" ]]; then
+  echo "UNKNOWN - Could not retrieve database usage"
+  exit 3
+fi
+
+# Avalia os limites
+if (( $(echo "$USED_PCT >= $CRIT" | bc -l) )); then
+  echo "CRITICAL - DB Usage: $USED_MB MB / $TOTAL_MB MB (${USED_PCT}%)"
+  exit 2
+elif (( $(echo "$USED_PCT >= $WARN" | bc -l) )); then
+  echo "WARNING - DB Usage: $USED_MB MB / $TOTAL_MB MB (${USED_PCT}%)"
+  exit 1
+else
+  echo "OK - DB Usage: $USED_MB MB / $TOTAL_MB MB (${USED_PCT}%)"
+  exit 0
+fi
