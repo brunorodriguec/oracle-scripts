@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Verifica se estamos executando como oracle, se não, reexecuta como oracle
+#if [ "$(whoami)" != "oracle" ]; then
+#    exec sudo -u oracle "$0" "$@"
+#    exit $?
+#fi
+
+# Ambiente Oracle
+export ORACLE_HOME=/u01/app/oracle/product/19.3.0/dbhome_1
+export ORACLE_SID=ORCL
+export PATH=$ORACLE_HOME/bin:$PATH
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+
+# Cria arquivo SQL temporário
+SQL_FILE=$(mktemp)
+cat > $SQL_FILE << 'EOF'
+SET PAGESIZE 0
+SET FEEDBACK OFF
+SET VERIFY OFF
+SET HEADING OFF
+SET LINESIZE 200
+
+SELECT
+    event || '|' ||
+    total_waits || '|' ||
+    time_waited / 100 || '|' ||
+    average_wait / 10
+FROM
+    v$system_event
+WHERE
+    event NOT LIKE 'SQL*Net%'
+    AND event NOT LIKE 'rdbms ipc%'
+    AND event NOT LIKE 'jobq slave wait'
+    AND event NOT LIKE 'Streams%'
+    AND event NOT IN ('queue messages', 'ges remote message', 'PX Idle Wait', 'null event')
+ORDER BY
+    time_waited DESC
+FETCH FIRST 10 ROWS ONLY;
+
+EXIT;
+EOF
+
+# Executa a consulta
+RESULT=$(sqlplus -s user/pass @$SQL_FILE)
+
+# Limpa arquivo temporário
+rm -f $SQL_FILE
+
+# Verifica se a consulta foi bem sucedida
+if [ $? -ne 0 ]; then
+    echo "CRITICAL - Erro ao executar consulta no banco de dados"
+    exit 2
+fi
+
+# Verifica se há resultados
+if [ -z "$RESULT" ]; then
+    echo "OK - Nenhum wait significativo encontrado"
+    exit 0
+fi
+
+# Saída formatada para Nagios
+echo "OK - Top Wait Events encontrados"
+#echo "<br><pre style='font-family: monospace; font-size: 11px;'>"
+echo "TOP WAIT EVENTS:"
+echo "================"
+
+echo "$RESULT" | while IFS='|' read -r EVENT TOTAL_WAITS TIME_WAITED AVG_WAIT; do
+    if [ -n "$EVENT" ]; then
+        echo "Evento: $EVENT"
+        echo "Total Waits: $TOTAL_WAITS | Tempo Total: ${TIME_WAITED}s | Média: ${AVG_WAIT}ms"
+        echo "---"
+    fi
+done
+
+echo "</pre>"
+
+exit 0
